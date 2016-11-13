@@ -1,0 +1,108 @@
+syntax = "proto3";
+package types;
+
+message Operation {
+	uint64 value = 1;
+}
+
+message Checkpoint {
+	uint64 sequence = 1;
+	string digest = 2;
+}
+
+message Entry {
+	uint64 sequence = 1;
+	string digest = 2;
+	uint64 view = 3;
+}
+
+message ViewChange {
+	uint64 view = 1;
+	uint64 sequence = 2;
+	repeated Checkpoint checkpoints = 3;
+	repeated Entry prepares = 4;
+	repeated Entry preprepares = 5;
+	uint64 viewchanger = 6;
+}
+
+message Result {
+	string value = 1;
+}
+
+// -------------------------------- //
+
+message Request {
+	oneof value{
+		RequestClient client = 1;
+		RequestPrePrepare preprepare = 2;
+		RequestPrepare prepare = 3;
+		RequestCommit commit = 4;
+		RequestCheckpoint checkpoint = 5;
+		RequestViewChange viewchange = 6;
+		RequestAck ack = 7;
+		RequestNewView newview = 8;
+	}
+}
+
+message RequestClient {
+	Operation op = 1;
+	string timestamp = 2;
+	string client = 3;
+}
+
+message RequestPrePrepare {
+	uint64 view = 1;
+	uint64 sequence = 2;
+	string digest = 3;
+	uint64 replica = 4;
+}
+
+message RequestPrepare {
+	uint64 view = 1;
+	uint64 sequence = 2;
+	string digest = 3;
+	uint64 replica = 4;
+} 
+
+message RequestCommit {
+	uint64 view = 1;
+	uint64 sequence = 2;
+	uint64 replica = 3;
+}
+
+message RequestCheckpoint {
+	uint64 sequence = 1;
+	string digest = 2;
+	uint64 replica = 3;
+}
+
+message RequestViewChange {
+	uint64 view = 1;
+	uint64 sequence = 2;
+	repeated Checkpoint checkpoints = 3;
+	repeated Entry prepares = 4;
+	repeated Entry preprepares = 5;
+	uint64 replica = 6; 
+}
+
+message RequestAck {
+	uint64 view = 1;
+	uint64 replica = 2;
+	uint64 viewchanger = 3;
+	string digest = 4;
+}
+
+message RequestNewView {
+	uint64 view = 1;
+	repeated ViewChange v = 2;
+	Checkpoint checkpoint = 3;
+	repeated ViewChange x = 4;
+}
+
+message Reply {
+	uint64 view = 1;
+	string timestamp = 2;
+	string client = 3;
+	uint64 replica = 4;
+	Result result = 5;
+}
