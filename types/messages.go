@@ -96,10 +96,10 @@ func ToRequestAck(view, replica, viewchanger uint64, digest []byte) *Request {
 	}
 }
 
-func ToRequestNewView(view uint64, checkpoint *Checkpoint, viewChanges []*ViewChange, summaries []*Summary, replica uint64) *Request {
+func ToRequestNewView(view uint64, viewChanges []*ViewChange, summaries []*Summary, replica uint64) *Request {
 	return &Request{
 		Value: &Request_Newview{
-			&RequestNewView{view, checkpoint, viewChanges, summaries, replica}},
+			&RequestNewView{view, viewChanges, summaries, replica}},
 	}
 }
 
