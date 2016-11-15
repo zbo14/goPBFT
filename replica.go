@@ -381,12 +381,12 @@ func (rep *Replica) clearPreprepared(sequence uint64) {
 
 // Clear requests
 
-func (rep *Replica) clearRequests(sequence uint64) {
+func (rep *Replica) clearRequestsBySeq(sequence uint64) {
 	rep.clearRequestClients()
-	rep.clearRequestPreprepares(sequence)
-	rep.clearRequestPrepares(sequence)
-	rep.clearRequestCommits(sequence)
-	rep.clearRequestCheckpoints(sequence)
+	rep.clearRequestPrepreparesBySeq(sequence)
+	rep.clearRequestPreparesBySeq(sequence)
+	rep.clearRequestCommitsBySeq(sequence)
+	rep.clearRequestCheckpointsBySeq(sequence)
 }
 
 func (rep *Replica) clearRequestClients() {
@@ -401,7 +401,7 @@ func (rep *Replica) clearRequestClients() {
 	rep.requests["client"] = clientReqs
 }
 
-func (rep *Replica) clearRequestPreprepares(sequence uint64) {
+func (rep *Replica) clearRequestPrepreparesBySeq(sequence uint64) {
 	prePrepares := rep.requests["pre-prepare"]
 	for idx, req := range rep.requests["pre-prepare"] {
 		s := req.GetPreprepare().Sequence
@@ -412,7 +412,7 @@ func (rep *Replica) clearRequestPreprepares(sequence uint64) {
 	rep.requests["pre-prepare"] = prePrepares
 }
 
-func (rep *Replica) clearRequestPrepares(sequence uint64) {
+func (rep *Replica) clearRequestPreparesBySeq(sequence uint64) {
 	prepares := rep.requests["prepare"]
 	for idx, req := range rep.requests["prepare"] {
 		s := req.GetPrepare().Sequence
@@ -423,7 +423,7 @@ func (rep *Replica) clearRequestPrepares(sequence uint64) {
 	rep.requests["prepare"] = prepares
 }
 
-func (rep *Replica) clearRequestCommits(sequence uint64) {
+func (rep *Replica) clearRequestCommitsBySeq(sequence uint64) {
 	commits := rep.requests["commit"]
 	for idx, req := range rep.requests["commit"] {
 		s := req.GetCommit().Sequence
@@ -434,7 +434,7 @@ func (rep *Replica) clearRequestCommits(sequence uint64) {
 	rep.requests["commit"] = commits
 }
 
-func (rep *Replica) clearRequestCheckpoints(sequence uint64) {
+func (rep *Replica) clearRequestCheckpointsBySeq(sequence uint64) {
 	checkpoints := rep.requests["checkpoint"]
 	for idx, req := range rep.requests["checkpoint"] {
 		s := req.GetCheckpoint().Sequence
@@ -443,6 +443,46 @@ func (rep *Replica) clearRequestCheckpoints(sequence uint64) {
 		}
 	}
 	rep.requests["checkpoint"] = checkpoints
+}
+
+func (rep *Replica) clearRequestsByView(view uint64) {
+	rep.clearRequestPrepreparesByView(view)
+	rep.clearRequestPreparesByView(view)
+	rep.clearRequestCommitsByView(view)
+	//add others
+}
+
+func (rep *Replica) clearRequestPrepreparesByView(view uint64) {
+	prePrepares := rep.requests["pre-prepare"]
+	for idx, req := range rep.requests["pre-prepare"] {
+		v := req.GetPreprepare().View
+		if v < view {
+			prePrepares = append(prePrepares[:idx], prePrepares[idx+1:]...)
+		}
+	}
+	rep.requests["pre-prepare"] = prePrepares
+}
+
+func (rep *Replica) clearRequestPreparesByView(view uint64) {
+	prepares := rep.requests["prepare"]
+	for idx, req := range rep.requests["prepare"] {
+		v := req.GetPrepare().View
+		if v < view {
+			prepares = append(prepares[:idx], prepares[idx+1:]...)
+		}
+	}
+	rep.requests["prepare"] = prepares
+}
+
+func (rep *Replica) clearRequestCommitsByView(view uint64) {
+	commits := rep.requests["commit"]
+	for idx, req := range rep.requests["commit"] {
+		v := req.GetCommit().View
+		if v < view {
+			commits = append(commits[:idx], commits[idx+1:]...)
+		}
+	}
+	rep.requests["commit"] = commits
 }
 
 // Handle requests
@@ -771,7 +811,7 @@ func (rep *Replica) handleRequestCheckpoint(REQ *pb.Request) {
 			continue
 		}
 		// rep.clearEntries(sequence)
-		rep.clearRequests(sequence)
+		rep.clearRequestsBySeq(sequence)
 		return
 	}
 	return
@@ -908,7 +948,7 @@ func (rep *Replica) handleRequestNewView(REQ *pb.Request) {
 	replica := REQ.GetNewview().Replica
 	primary := rep.newPrimary(view)
 
-	if replica != primary || rep.ID == primary {
+	if replica != primary {
 		return
 	}
 
@@ -917,6 +957,7 @@ func (rep *Replica) handleRequestNewView(REQ *pb.Request) {
 	}
 
 	rep.logRequest(REQ)
+
 	rep.processNewView(REQ)
 }
 
@@ -1155,7 +1196,7 @@ func (rep *Replica) correctSummaries(requests []*pb.Request, summaries []*pb.Sum
 	return true
 }
 
-func (rep *Replica) processNewView(REQ *pb.Request) {
+func (rep *Replica) processNewView(REQ *pb.Request) (success bool) {
 
 	if rep.activeView {
 		return
@@ -1190,8 +1231,16 @@ func (rep *Replica) processNewView(REQ *pb.Request) {
 			s = summary.Sequence
 		}
 		if summary.Sequence > h {
-			//&&digest not in log
-			//return
+			valid := false
+			for _, req := range rep.requests["view-change"] { //in
+				if pb.EQ(req.Digest(), summary.Digest) {
+					valid = true
+					break
+				}
+			}
+			if !valid {
+				return
+			}
 		}
 	}
 
@@ -1202,30 +1251,35 @@ func (rep *Replica) processNewView(REQ *pb.Request) {
 	// Process new view
 	rep.activeView = true
 
-	for _, summary := range reqNewView.GetSummaries() {
+	for _, summary := range summaries {
 
-		req := pb.ToRequestPrepare(
-			rep.view,
-			summary.Sequence,
-			summary.Digest,
-			rep.ID) // the backup sends/logs prepare
+		if rep.ID != reqNewView.Replica {
+			req := pb.ToRequestPrepare(
+				reqNewView.View,
+				summary.Sequence,
+				summary.Digest,
+				rep.ID) // the backup sends/logs prepare
 
-		go func() {
-			if !rep.hasRequest(req) {
-				rep.requestChan <- req
+			go func() {
+				if !rep.hasRequest(req) {
+					rep.requestChan <- req
+				}
+			}()
+			if summary.Sequence <= h {
+				continue
 			}
-		}()
 
-		if summary.Sequence <= h {
-			continue
+			if !rep.hasRequest(req) {
+				rep.logRequest(req)
+			}
+		} else {
+			if summary.Sequence <= h {
+				break
+			}
 		}
 
-		if !rep.hasRequest(req) {
-			rep.logRequest(req)
-		}
-
-		req = pb.ToRequestPreprepare(
-			rep.view,
+		req := pb.ToRequestPreprepare(
+			reqNewView.View,
 			summary.Sequence,
 			summary.Digest,
 			reqNewView.Replica) // new primary pre-prepares
@@ -1243,8 +1297,84 @@ func (rep *Replica) processNewView(REQ *pb.Request) {
 		}
 	}
 	rep.sequence = maxSequence
+	return true
 }
 
+func (rep *Replica) prePrepBySequence(sequence uint64) []*pb.Entry {
+	var view uint64
+	var requests []*pb.Request
+	for _, req := range rep.requests["pre-prepare"] {
+		v := req.GetPreprepare().View
+		s := req.GetPreprepare().Sequence
+		if v >= view && s == sequence {
+			view = v
+			requests = append(requests, req)
+		}
+	}
+	if requests == nil {
+		return nil
+	}
+	var prePreps []*pb.Entry
+	for _, req := range requests {
+		v := req.GetPreprepare().View
+		if v == view {
+			s := req.GetPreprepare().Sequence
+			d := req.GetPreprepare().Digest
+			prePrep := pb.ToEntry(s, d, v)
+			prePreps = append(prePreps, prePrep)
+		}
+	}
+FOR_LOOP:
+	for _, prePrep := range prePreps {
+		for _, req := range rep.allRequests() { //TODO: optimize
+			if pb.EQ(req.Digest(), prePrep.Digest) {
+				continue FOR_LOOP
+			}
+		}
+		return nil
+	}
+	return prePreps
+}
+
+func (rep *Replica) prepBySequence(sequence uint64) ([]*pb.Entry, []*pb.Entry) {
+
+	prePreps := rep.prePrepBySequence(sequence)
+
+	if prePreps == nil {
+		return nil, nil
+	}
+
+	var preps []*pb.Entry
+
+FOR_LOOP:
+	for _, prePrep := range prePreps {
+
+		view := prePrep.View
+		digest := prePrep.Digest
+
+		replicas := make(map[uint64]int)
+		for _, req := range rep.requests["prepare"] {
+			reqPrepare := req.GetPrepare()
+			v := reqPrepare.View
+			s := reqPrepare.Sequence
+			d := reqPrepare.Digest
+			if v == view && s == sequence && pb.EQ(d, digest) {
+				r := reqPrepare.Replica
+				replicas[r]++
+				if rep.twoThirds(replicas[r]) {
+					prep := pb.ToEntry(s, d, v)
+					preps = append(preps, prep)
+					continue FOR_LOOP
+				}
+			}
+		}
+		return prePreps, nil
+	}
+
+	return prePreps, preps
+}
+
+/*
 func (rep *Replica) prepBySequence(sequence uint64) *pb.Entry {
 	var REQ *pb.Request
 	var view uint64
@@ -1302,35 +1432,38 @@ func (rep *Replica) prePrepBySequence(sequence uint64) *pb.Entry {
 	entry := pb.ToEntry(sequence, digest, view)
 	return entry
 }
+*/
 
-func (rep *Replica) requestViewChange() {
+func (rep *Replica) requestViewChange(view uint64) {
 
-	rep.view += 1
+	if view != rep.view+1 {
+		return
+	}
+	rep.view = view
 	rep.activeView = false
 
-	var preps []*pb.Entry
 	var prePreps []*pb.Entry
+	var preps []*pb.Entry
 
 	start := rep.lowWaterMark() + 1
 	end := rep.highWaterMark()
 
 	for s := start; s <= end; s++ {
-		entry := rep.prepBySequence(s)
-		if entry != nil {
-			preps = append(preps, entry)
+		_prePreps, _preps := rep.prepBySequence(s)
+		if _prePreps != nil {
+			prePreps = append(prePreps, _prePreps...)
 		}
-		entry = rep.prePrepBySequence(s)
-		if entry != nil {
-			prePreps = append(prePreps, entry)
+		if _preps != nil {
+			preps = append(preps, _preps...)
 		}
 	}
 
 	sequence := rep.lowWaterMark()
 
 	req := pb.ToRequestViewChange(
-		rep.view,
+		view,
 		sequence,
-		rep.checkpoints,
+		rep.checkpoints, //
 		preps,
 		prePreps,
 		rep.ID)
@@ -1341,9 +1474,7 @@ func (rep *Replica) requestViewChange() {
 		rep.requestChan <- req
 	}()
 
-	rep.clearRequestPreprepares(sequence)
-	rep.clearRequestPrepares(sequence)
-	rep.clearRequestCommits(sequence)
+	rep.clearRequestsByView(view)
 }
 
 func (rep *Replica) createNewView(view uint64) (request *pb.Request) {
@@ -1405,6 +1536,7 @@ FOR_LOOP_1:
 	end = start + CHECKPOINT_PERIOD*CONSTANT_FACTOR
 
 	// select summaries
+	// TODO: optimize
 FOR_LOOP_2:
 	for seq := start; seq <= end; seq++ {
 
@@ -1459,18 +1591,6 @@ FOR_LOOP_2:
 		}
 	}
 
-	requests := rep.correctViewChanges(viewChanges)
-
-	if requests == nil {
-		return
-	}
-
-	correct := rep.correctSummaries(requests, summaries)
-
-	if !correct {
-		return
-	}
-
 	request = pb.ToRequestNewView(view, viewChanges, summaries, rep.ID)
 	return
 }
@@ -1483,47 +1603,18 @@ func (rep *Replica) requestNewView(view uint64) {
 		return
 	}
 
+	// Process new view
+
+	success := rep.processNewView(req)
+
+	if !success {
+		return
+	}
+
 	rep.logRequest(req)
+
 	go func() {
 		rep.requestChan <- req
 	}()
 
-	// Process new view
-
-	var h uint64
-	for _, checkpoint := range rep.checkpoints {
-		if checkpoint.Sequence < h || h == uint64(0) {
-			h = checkpoint.Sequence
-		}
-	}
-
-	summaries := req.GetNewview().GetSummaries()
-
-	for _, summary := range summaries {
-
-		if summary.Sequence <= h {
-			break
-		}
-
-		req = pb.ToRequestPreprepare(
-			view,
-			summary.Sequence,
-			summary.Digest,
-			rep.ID)
-
-		if !rep.hasRequest(req) {
-			rep.logRequest(req)
-		}
-	}
-
-	var maxSequence uint64
-	for _, req := range rep.requests["pre-prepare"] {
-
-		reqPrePrepare := req.GetPreprepare()
-
-		if reqPrePrepare.Sequence > maxSequence {
-			maxSequence = reqPrePrepare.Sequence
-		}
-	}
-	rep.sequence = maxSequence
 }
