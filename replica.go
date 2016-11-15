@@ -985,24 +985,24 @@ func (rep *Replica) correctSummaries(requests []*pb.Request, summaries []*pb.Sum
 		}
 	}
 
-	var S1 []*pb.Request
-	var S2 []*pb.Request
+	var A1 []*pb.Request
+	var A2 []*pb.Request
 
 	valid := false
 	for _, req := range requests {
 		reqViewChange := req.GetViewchange()
 		s := reqViewChange.Sequence
 		if s <= start {
-			S1 = append(S1, req)
+			A1 = append(A1, req)
 		}
 		checkpoints := reqViewChange.GetCheckpoints()
 		for _, checkpoint := range checkpoints {
 			if checkpoint.Sequence == start && pb.EQ(checkpoint.Digest, digest) {
-				S2 = append(S2, req)
+				A2 = append(A2, req)
 				break
 			}
 		}
-		if rep.twoThirds(len(S1)) && rep.oneThird(len(S2)) {
+		if rep.twoThirds(len(A1)) && rep.oneThird(len(A2)) {
 			valid = true
 			break
 		}
@@ -1349,7 +1349,7 @@ func (rep *Replica) requestViewChange() {
 func (rep *Replica) createNewView(view uint64) (request *pb.Request) {
 
 	// Returns RequestNewView if successful, else returns nil
-
+	// create viewChanges
 	viewChanges := make([]*pb.ViewChange, len(rep.pendingVC))
 
 	for idx, _ := range viewChanges {
@@ -1365,7 +1365,8 @@ func (rep *Replica) createNewView(view uint64) (request *pb.Request) {
 	start := rep.lowWaterMark() + 1
 	end := rep.highWaterMark()
 
-FOR_LOOP:
+	// select starting checkpoint
+FOR_LOOP_1:
 	for seq := start; seq <= end; seq++ {
 
 		overLWM := 0
@@ -1389,14 +1390,74 @@ FOR_LOOP:
 			}
 			if rep.twoThirds(overLWM) && rep.oneThird(digests[string(digest)]) {
 				summary = pb.ToSummary(seq, digest)
-				continue FOR_LOOP
+				continue FOR_LOOP_1
 			}
 		}
 	}
 
+	if summary == nil {
+		return
+	}
+
 	summaries = append(summaries, summary)
 
-	// add requests to summaries
+	start = summary.Sequence
+	end = start + CHECKPOINT_PERIOD*CONSTANT_FACTOR
+
+	// select summaries
+FOR_LOOP_2:
+	for seq := start; seq <= end; seq++ {
+
+		for _, REQ := range rep.pendingVC {
+
+			sequence := REQ.GetViewchange().Sequence
+
+			if sequence != seq {
+				continue
+			}
+
+			var A1 []*pb.Request
+			var A2 []*pb.Request
+
+			view := REQ.GetViewchange().View
+			digest := REQ.Digest()
+
+		FOR_LOOP_3:
+			for _, req := range rep.pendingVC {
+
+				reqViewChange := req.GetViewchange()
+
+				if reqViewChange.Sequence < sequence {
+					preps := reqViewChange.GetPreps()
+					for _, prep := range preps {
+						if prep.Sequence != sequence {
+							continue
+						}
+						if prep.View > view || (prep.View == view && !pb.EQ(prep.Digest, digest)) {
+							continue FOR_LOOP_3
+						}
+					}
+					A1 = append(A1, req)
+				}
+				prePreps := reqViewChange.GetPrepreps()
+				for _, prePrep := range prePreps {
+					if prePrep.Sequence != sequence {
+						continue
+					}
+					if prePrep.View >= view && pb.EQ(prePrep.Digest, digest) {
+						A2 = append(A2, req)
+						continue FOR_LOOP_3
+					}
+				}
+			}
+
+			if rep.twoThirds(len(A1)) && rep.oneThird(len(A2)) {
+				summary = pb.ToSummary(sequence, digest)
+				summaries = append(summaries, summary)
+				continue FOR_LOOP_2
+			}
+		}
+	}
 
 	requests := rep.correctViewChanges(viewChanges)
 
